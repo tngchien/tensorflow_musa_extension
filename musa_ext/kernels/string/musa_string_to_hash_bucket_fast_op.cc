@@ -1,109 +1,63 @@
-/* Copyright 2026 The TensorFlow MUSA Authors. All Rights Reserved.
+#include <musa_runtime.h>
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
-// StringToHashBucketFast operator for MUSA device.
-// This is a CPU-based operator since string hashing is typically performed
-// on the host. Both input and output tensors are in host memory.
-
+#include "kernels/utils_op.h"
+#include "mu/device/musa_memcpy.h"
+#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/platform/fingerprint.h"
+#include "tensorflow/core/framework/shape_inference.h"
+#include "tensorflow/core/lib/hash/hash.h"
 
 namespace tensorflow {
 namespace musa {
 
-class StringToHashBucketFastOp : public OpKernel {
+class MusaStringToHashBucketFastOp : public OpKernel {
  public:
-  explicit StringToHashBucketFastOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
+  explicit MusaStringToHashBucketFastOp(OpKernelConstruction* ctx)
+      : OpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("num_buckets", &num_buckets_));
-    OP_REQUIRES(ctx, num_buckets_ > 0,
-                errors::InvalidArgument("num_buckets must be > 0, got ",
-                                        num_buckets_));
   }
-
-  // String hashing is compute-intensive, mark as expensive to allow
-  // the TensorFlow runtime to schedule it appropriately.
-  bool IsExpensive() override { return true; }
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor* input_tensor;
     OP_REQUIRES_OK(ctx, ctx->input("input", &input_tensor));
-
-    // Handle empty tensor case
-    if (input_tensor->NumElements() == 0) {
-      Tensor* output_tensor = nullptr;
-      OP_REQUIRES_OK(ctx,
-                     ctx->allocate_output(0, input_tensor->shape(), &output_tensor));
-      return;
-    }
-
     const auto& input_flat = input_tensor->flat<tstring>();
-    const int64 N = input_tensor->NumElements();
 
-<<<<<<< HEAD
-    // Allocate output tensor (host memory since HostMemory("output") is set)
     Tensor* output_tensor = nullptr;
-    OP_REQUIRES_OK(ctx, ctx->allocate_output(0, input_tensor->shape(), &output_tensor));
-    auto output_flat = output_tensor->flat<int64>();
+    OP_REQUIRES_OK(
+        ctx, ctx->allocate_output(0, input_tensor->shape(), &output_tensor));
 
-    // Compute hash values directly on host
+    if (input_tensor->NumElements() == 0) return;
+
+    int64 N = input_tensor->NumElements();
+
+    std::vector<int64> host_output(N);
+
     for (int64 i = 0; i < N; ++i) {
       const tstring& s = input_flat(i);
-      const uint64 hash = tensorflow::Fingerprint64(
-          tensorflow::StringPiece(s.data(), s.size()));
-      output_flat(i) = static_cast<int64>(hash % static_cast<uint64>(num_buckets_));
+
+      uint64 hash = tensorflow::Hash64(s.data(), s.size());
+
+      host_output[i] = static_cast<int64>(hash % num_buckets_);
     }
-=======
-    // CRITICAL PERFORMANCE FIX: Removed stream synchronization after memcpy.
-    //
-    // The original code called musaStreamSynchronize here, which blocked the
-    // host until the H2D transfer completed. This completely serialized the
-    // execution and prevented any overlap with subsequent operations.
-    //
-    // CORRECT APPROACH: Issue async copy and return immediately.
-    // TensorFlow's executor will ensure that any operations depending on
-    // this output won't start until the copy completes, through stream
-    // ordering and dependency tracking.
-    //
-    // This is a pure CPU->GPU data transfer with no dependencies on other
-    // GPU operations, so there's no need to wait here.
+
+    int64* device_ptr = output_tensor->flat<int64>().data();
+
     musaStream_t stream = GetMusaStreamByCtx(ctx);
     mStatus status = MusaMemcpyAsyncH2D(device_ptr, host_output.data(),
                                         N * sizeof(int64), stream);
 
     OP_REQUIRES(ctx, status == mStatus::SUCCESS,
                 errors::Internal("MUSA StringToHashBucketFast: memcpy failed"));
-
-    // REMOVED: musaStreamSynchronize(stream) was here causing host blocking.
-    // Let TF's dependency tracking handle synchronization naturally.
->>>>>>> 67d1bb7 (feat: refactor with streamExecutor and optimize memcpy for some kernels)
   }
 
  private:
   int64 num_buckets_;
 };
 
-// Register the kernel with HostMemory for both input and output.
-// String tensors are always stored in host memory, and the hash computation
-// is performed on the CPU.
-#define REGISTER_MUSA_KERNEL()                                             \
-  REGISTER_KERNEL_BUILDER(Name("StringToHashBucketFast")                  \
-                              .Device("MUSA")                             \
-                              .HostMemory("input")                        \
-                              .HostMemory("output"),                      \
-                          StringToHashBucketFastOp);
+#define REGISTER_MUSA_KERNEL()                                           \
+  REGISTER_KERNEL_BUILDER(                                               \
+      Name("StringToHashBucketFast").Device("MUSA").HostMemory("input"), \
+      MusaStringToHashBucketFastOp);
 
 REGISTER_MUSA_KERNEL();
 

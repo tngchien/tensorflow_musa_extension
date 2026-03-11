@@ -20,14 +20,7 @@ std::string TensorToSummary(OpKernelContext* c, const Tensor& device_tensor,
   Tensor cpu_tensor(device_tensor.dtype(), device_tensor.shape());
   MusaMemcpyD2H(const_cast<char*>(cpu_tensor.tensor_data().data()),
                 device_tensor.tensor_data().data(), device_tensor.TotalBytes());
-  // PERFORMANCE FIX: Removed musaDeviceSynchronize() from here.
-  // The synchronous MusaMemcpyD2H now returns immediately after launching
-  // the async copy. We need to ensure synchronization before accessing data.
-  //
-  // However, the data copy is needed immediately for the summary, so we
-  // use the synchronous version of the copy or add a sync here.
-  // Given the nature of logging ops (debugging purpose), we keep the sync
-  // but use stream-level sync instead of device-level for better performance.
+
   auto* stream = c->op_device_context()->stream();
   if (stream) {
     stream->BlockHostUntilDone().IgnoreError();
@@ -52,14 +45,6 @@ class MusaPrintOp : public OpKernel {
     if (first_n_ >= 0 && printed_count.load() >= first_n_) return;
     printed_count++;
 
-    // PERFORMANCE FIX: Replaced musaDeviceSynchronize() with lighter-weight
-    // stream synchronization.
-    //
-    // musaDeviceSynchronize() blocks until ALL operations on ALL streams
-    // complete, which is overkill for printing a single tensor.
-    //
-    // OPTIMIZATION: Use stream-level synchronization which only waits for
-    // operations on the specific stream we're interested in.
     auto* stream = c->op_device_context()->stream();
     if (stream) {
       stream->BlockHostUntilDone().IgnoreError();
@@ -91,8 +76,7 @@ class MusaPrintV2Op : public OpKernel {
   }
 
   void Compute(OpKernelContext* c) override {
-    // PERFORMANCE FIX: Replaced musaDeviceSynchronize() with stream-level sync.
-    // See MusaPrintOp for detailed explanation.
+
     auto* stream = c->op_device_context()->stream();
     if (stream) {
       stream->BlockHostUntilDone().IgnoreError();
@@ -133,8 +117,6 @@ class MusaStringFormatOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* c) override {
-    // PERFORMANCE FIX: Replaced musaDeviceSynchronize() with stream-level sync.
-    // See MusaPrintOp for detailed explanation.
     auto* stream = c->op_device_context()->stream();
     if (stream) {
       stream->BlockHostUntilDone().IgnoreError();
