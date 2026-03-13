@@ -17,7 +17,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
  
       # 2. 将拉取到的代码拷贝到那个一直运行的容器中
       # 使用 github.run_id 创建独立目录，防止多次 PR 测试时的代码互相冲突
