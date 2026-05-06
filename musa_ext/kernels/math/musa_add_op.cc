@@ -173,10 +173,8 @@ AddFastPathResult TryLaunchAddFastPath<float>(OpKernelContext* ctx,
   const float* in0_ptr = in0.flat<float>().data();
   const float* in1_ptr = in1.flat<float>().data();
   float* out_ptr = out->flat<float>().data();
+  // Null stream means the device default stream in MUSA runtime.
   musaStream_t stream = GetMusaStreamByCtx(ctx);
-  if (stream == nullptr) {
-    return AddFastPathResult::kNotHandled;
-  }
 
   bool launched = false;
   if (same_shape) {
