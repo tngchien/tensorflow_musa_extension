@@ -244,6 +244,7 @@ class MCUProfiler:
         self._parse_text_content(path.read_text(encoding="utf-8", errors="ignore"), raw)
 
     def _parse_text_content(self, text, raw):
+        self._parse_section_tables(text, raw)
         for line in text.splitlines():
             match = re.match(r"\s*([^:=,]{3,}?)\s*[:=,]\s*([-+0-9.eE%]+)", line)
             if match:
@@ -259,18 +260,99 @@ class MCUProfiler:
                 if key and value is not None:
                     raw[normalize_metric(key)] = value
 
+    def _parse_section_tables(self, text, raw):
+        section = None
+        in_table = False
+        for line in text.splitlines():
+            section_match = re.match(r"\s*Section:\s*(.+?)\s*$", line)
+            if section_match:
+                section = normalize_metric(section_match.group(1))
+                in_table = False
+                continue
+
+            stripped = line.strip()
+            if section and not stripped:
+                section = None
+                in_table = False
+                continue
+            if not section or re.fullmatch(r"[-\s]+", stripped):
+                continue
+            if stripped.startswith("Metric Name"):
+                in_table = True
+                continue
+            if not in_table:
+                continue
+
+            row = re.match(
+                r"\s*(.+?)\s{2,}(?:(%|us|cycle|Gbyte/s|Ghz|thread|register/thread|Kbyte/block|byte/block)\s+)?([-+0-9.,]+)\s*$",
+                line,
+            )
+            if not row:
+                continue
+            name = normalize_metric(row.group(1))
+            unit = normalize_unit(row.group(2))
+            value = parse_number(row.group(3))
+            if name and value is not None:
+                key = f"{section}.{name}"
+                raw[key] = value
+                if unit:
+                    raw[f"{key}.{unit}"] = value
+
     def summarize(self, metrics):
         bank_value = find_metric(metrics, (r"bank.*conflict", r"conflict.*bank", r"bank_conflict"))
         l1_hit = find_metric(metrics, (r"^l1__sector_hit_rate\.pct$", r"l1.*hit.*rate"))
         l2_hit = find_metric(metrics, (r"l2.*hit.*rate",))
         key_metrics = {
-            "ddr_util_pct": find_metric(metrics, (r"ddr__throughput.*pct", r"ddr_throughput")),
-            "gpu_memory_util_pct": find_metric(metrics, (r"gpu__compute_memory_throughput.*pct", r"^memory_throughput$")),
+            "compute_util_pct": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.compute\(mp\)_throughput\.pct$",
+                r"gpu_speed_of_light_throughput\.compute\(mp\)_throughput$",
+            )),
+            "ddr_util_pct": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.ddr_throughput\.pct$",
+                r"gpu_speed_of_light_throughput\.ddr_throughput$",
+                r"ddr__throughput.*pct",
+                r"^ddr_throughput$",
+            )),
+            "gpu_memory_util_pct": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.memory_throughput\.pct$",
+                r"gpu_speed_of_light_throughput\.memory_throughput$",
+                r"gpu__compute_memory_throughput.*pct",
+                r"^memory_throughput$",
+            )),
+            "memory_throughput_gbytes_per_s": find_metric(metrics, (
+                r"memory_workload_analysis\.memory_throughput\.gbytes_per_s$",
+            )),
+            "mem_busy_pct": find_metric(metrics, (
+                r"memory_workload_analysis\.mem_busy\.pct$",
+                r"memory_workload_analysis\.mem_busy$",
+            )),
+            "max_bandwidth_pct": find_metric(metrics, (
+                r"memory_workload_analysis\.max_bandwidth\.pct$",
+                r"memory_workload_analysis\.max_bandwidth$",
+            )),
             "gpu_memory_access_util_pct": find_metric(metrics, (r"gpu__compute_memory_access_throughput.*pct",)),
             "gpu_memory_request_util_pct": find_metric(metrics, (r"gpu__compute_memory_request_throughput.*pct",)),
-            "l1_throughput_pct": find_metric(metrics, (r"l1__throughput.*pct", r"l1_cache_throughput")),
-            "l2_throughput_pct": find_metric(metrics, (r"l2pu__throughput.*pct", r"l2_cache_throughput")),
-            "duration_us": find_metric(metrics, (r"^duration$",)),
+            "l1_throughput_pct": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.l1_cache_throughput\.pct$",
+                r"gpu_speed_of_light_throughput\.l1_cache_throughput$",
+                r"l1__throughput.*pct",
+                r"^l1_cache_throughput$",
+            )),
+            "l2_throughput_pct": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.l2_cache_throughput\.pct$",
+                r"gpu_speed_of_light_throughput\.l2_cache_throughput$",
+                r"l2pu__throughput.*pct",
+                r"^l2_cache_throughput$",
+            )),
+            "llc_throughput_pct": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.llc_throughput\.pct$",
+                r"gpu_speed_of_light_throughput\.llc_throughput$",
+            )),
+            "duration_us": find_metric(metrics, (
+                r"gpu_speed_of_light_throughput\.duration\.us$",
+                r"gpu_speed_of_light_throughput\.duration$",
+                r"^duration$",
+            )),
         }
         key_metrics = {key: value for key, value in key_metrics.items() if value is not None}
         return {
@@ -290,6 +372,18 @@ def normalize_metric(name):
     return re.sub(r"\s+", "_", str(name).strip().lower())
 
 
+def normalize_unit(unit):
+    if not unit:
+        return ""
+    unit = str(unit).strip().lower()
+    return {
+        "%": "pct",
+        "gbyte/s": "gbytes_per_s",
+        "ghz": "ghz",
+        "us": "us",
+    }.get(unit, re.sub(r"[^a-z0-9]+", "_", unit).strip("_"))
+
+
 def find_header_index(header, names):
     for name in names:
         if name in header:
@@ -300,7 +394,8 @@ def find_header_index(header, names):
 def parse_number(value):
     if isinstance(value, (int, float)):
         return float(value)
-    match = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(value))
+    text = str(value).replace(",", "")
+    match = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", text)
     return float(match.group(0)) if match else None
 
 
@@ -422,13 +517,19 @@ def print_result(result):
             f"bank_conflict={mcu.get('bank_conflict', {}).get('severity')} "
             f"l1_hit={format_optional_pct(mcu.get('l1_hit_rate_pct'))} "
             f"l2_hit={format_optional_pct(mcu.get('l2_hit_rate_pct'))} "
+            f"compute_util={format_optional_pct(key_metrics.get('compute_util_pct'))} "
             f"ddr_util={format_optional_pct(key_metrics.get('ddr_util_pct'))} "
-            f"mem_util={format_optional_pct(key_metrics.get('gpu_memory_util_pct'))}"
+            f"mem_util={format_optional_pct(key_metrics.get('gpu_memory_util_pct'))} "
+            f"mem_bw={format_optional_gbytes(key_metrics.get('memory_throughput_gbytes_per_s'))}"
         )
 
 
 def format_optional_pct(value):
     return "unknown" if value is None else f"{value:.1f}%"
+
+
+def format_optional_gbytes(value):
+    return "unknown" if value is None else f"{value:.2f}GB/s"
 
 
 def add_common_args(parser):

@@ -10,7 +10,7 @@ import tensorflow as tf
 import tensorflow.compat.v1 as tf1
 import tensorflow_musa as tf_musa
 
-from benchmark.commons import (
+from commons import (
     HardwareSpec,
     add_common_args,
     attach_perf_metrics,
