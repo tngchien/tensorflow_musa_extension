@@ -431,8 +431,10 @@ def attach_perf_metrics(fn):
 def profile_with_mcu(op_name, script_path):
     def decorator(fn):
         @wraps(fn)
-        def wrapper(lhs_shape, rhs_shape, dtype_info, args, seed, shape_index):
-            result = fn(lhs_shape, rhs_shape, dtype_info, args, seed, shape_index)
+        def wrapper(*fn_args, **kwargs):
+            result = fn(*fn_args, **kwargs)
+            args = fn_args[-3]
+            shape_index = fn_args[-1]
             if args.profile == "mcu" and not args.profile_child:
                 result["mcu"] = MCUProfiler(args, op_name, script_path).run(
                     shape_index, result["dtype"])
