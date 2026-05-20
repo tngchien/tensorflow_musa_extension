@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "../utils_op.h"
+#include "tensorflow/core/framework/bfloat16.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -12,10 +13,22 @@
 namespace tensorflow {
 namespace musa {
 
+constexpr int kMaxInlineTileDims = 8;
+
+struct TileDims {
+  int64_t input[kMaxInlineTileDims];
+  int64_t output[kMaxInlineTileDims];
+};
+
 template <typename T>
 void LaunchMusaTileKernel(const T* input, const int64_t* input_dims,
                           const int64_t* output_dims, int dims,
                           int64_t output_size, T* output, musaStream_t stream);
+
+template <typename T>
+void LaunchMusaTileSmallDimsKernel(const T* input, TileDims tile_dims, int dims,
+                                   int64_t output_size, T* output,
+                                   musaStream_t stream);
 
 namespace {
 
@@ -74,6 +87,23 @@ class MusaTileOp : public MusaOpKernel {
     OP_REQUIRES_OK(context, context->allocate_output(0, output_shape, &output));
     if (output->NumElements() == 0) return;
 
+    musaStream_t stream = GetMusaStreamByCtx(context);
+    if (input_dims <= kMaxInlineTileDims) {
+      TileDims tile_dims;
+      for (int i = 0; i < input_dims; ++i) {
+        tile_dims.input[i] = input_dims_host[i];
+        tile_dims.output[i] = output_dims_host[i];
+      }
+      LaunchMusaTileSmallDimsKernel<T>(input.flat<T>().data(), tile_dims,
+                                       input_dims, output->NumElements(),
+                                       output->flat<T>().data(), stream);
+      auto launch_status = musaGetLastError();
+      OP_REQUIRES(context, launch_status == musaSuccess,
+                  errors::Internal("Tile small-dims fast path failed: ",
+                                   musaGetErrorString(launch_status)));
+      return;
+    }
+
     Tensor input_dims_dev;
     Tensor output_dims_dev;
     OP_REQUIRES_OK(context,
@@ -83,7 +113,6 @@ class MusaTileOp : public MusaOpKernel {
                    context->allocate_temp(DT_INT64, TensorShape({input_dims}),
                                           &output_dims_dev));
 
-    musaStream_t stream = GetMusaStreamByCtx(context);
     const size_t dims_bytes = input_dims * sizeof(int64_t);
 
     auto copy_status = musaMemcpyAsync(input_dims_dev.flat<int64_t>().data(),
@@ -123,6 +152,7 @@ class MusaTileOp : public MusaOpKernel {
 
 REGISTER_MUSA_TILE_ALL_TYPES(float);
 REGISTER_MUSA_TILE_ALL_TYPES(Eigen::half);
+REGISTER_MUSA_TILE_ALL_TYPES(bfloat16);
 REGISTER_MUSA_TILE_ALL_TYPES(double);
 REGISTER_MUSA_TILE_ALL_TYPES(int32);
 REGISTER_MUSA_TILE_ALL_TYPES(int64);
